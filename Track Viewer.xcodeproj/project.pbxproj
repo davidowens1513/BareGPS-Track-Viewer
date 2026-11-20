@@ -6,8 +6,13 @@
 	objectVersion = 90;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		95FED5CD3086AB3A00CDE43B /* TrackImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95FED5CC3086AB3A00CDE43B /* TrackImport.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* Track Viewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Track Viewer.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		95FED5CC3086AB3A00CDE43B /* TrackImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackImport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -31,6 +36,7 @@
 			isa = PBXGroup;
 			children = (
 				000000000000000000000010 /* Track Viewer */,
+				95FED5CC3086AB3A00CDE43B /* TrackImport.swift */,
 				000000000000000000000020 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -110,6 +116,7 @@
 		000000000000000120000000 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			files = (
+				95FED5CD3086AB3A00CDE43B /* TrackImport.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

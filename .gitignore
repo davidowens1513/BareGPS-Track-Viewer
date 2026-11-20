@@ -1,0 +1,8 @@
+.DS_Store
+xcuserdata/
+DerivedData/
+*.xcuserstate
+/Track Viewer/TrackData/
+/web/dist/
+/web/.wrangler/
+/web/public/known-track-locations.json

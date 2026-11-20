@@ -1,17 +1,73 @@
 import SQLite3
+import Compression
 import SwiftUI
 import WebKit
 
+enum OpenBareMapLayer: String, CaseIterable, Identifiable {
+    case hillshade, landCover, boundaries, minorRoads, roadNames
+    case railwaysAndStations, ferryRoutes, cyclingRoutes, hikingRoutes
+    case islandNames, waterFeatureNames, irishGrid, townlands
+
+    static let defaultVisible = Set(allCases).subtracting([
+        .boundaries, .roadNames, .railwaysAndStations, .ferryRoutes
+    ])
+
+    var id: Self { self }
+
+    var title: LocalizedStringResource {
+        switch self {
+        case .hillshade: "Hillshade"
+        case .landCover: "Land Cover"
+        case .boundaries: "Boundaries"
+        case .minorRoads: "Minor Roads"
+        case .roadNames: "Road Names"
+        case .railwaysAndStations: "Railways and Stations"
+        case .ferryRoutes: "Ferry Routes"
+        case .cyclingRoutes: "Cycling Routes"
+        case .hikingRoutes: "Hiking Routes"
+        case .islandNames: "Island Names"
+        case .waterFeatureNames: "Water-Feature Names"
+        case .irishGrid: "Irish Grid"
+        case .townlands: "Townlands"
+        }
+    }
+
+    var layerIdentifiers: [String] {
+        switch self {
+        case .hillshade: ["terrain-hillshade"]
+        case .landCover: ["landcover"]
+        case .boundaries: ["administrative-boundaries", "county-boundaries", "local-boundaries"]
+        case .minorRoads: ["roads-casing-minor", "roads-minor-path", "roads-minor-track", "roads-minor"]
+        case .roadNames: ["road-labels"]
+        case .railwaysAndStations: ["railways", "station-labels"]
+        case .ferryRoutes: ["ferry-routes"]
+        case .cyclingRoutes: ["cycling-routes"]
+        case .hikingRoutes: ["hiking-routes"]
+        case .islandNames: ["island-labels"]
+        case .waterFeatureNames: ["water-labels"]
+        case .irishGrid: ["irish-grid-1km", "irish-grid-10km", "irish-grid-labels"]
+        case .townlands: ["townland-labels"]
+        }
+    }
+}
+
 struct MapLibreMapView: NSViewRepresentable {
     let usesOpenBareMap: Bool
+    let visibleOpenBareMapLayers: Set<OpenBareMapLayer>
+    let showsTracks: Bool
+    let selectedTrackID: String?
+    let visibleTrackIDs: [String]?
+    let onTrackClick: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(onTrackClick: onTrackClick)
     }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
         configuration.setURLSchemeHandler(context.coordinator.resourceHandler, forURLScheme: "mapdata")
+        configuration.userContentController.add(context.coordinator, name: "trackClick")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
@@ -22,38 +78,111 @@ struct MapLibreMapView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.onTrackClick = onTrackClick
         context.coordinator.requestedStyle = usesOpenBareMap ? .openBareMap : .openTopo
+        context.coordinator.requestedVisibleLayers = visibleOpenBareMapLayers
+        context.coordinator.requestedTracksVisible = showsTracks
+        context.coordinator.requestedSelectedTrackID = selectedTrackID
+        context.coordinator.requestedVisibleTrackIDs = visibleTrackIDs?.sorted()
         context.coordinator.applyRequestedStyleIfReady()
+        context.coordinator.applyRequestedLayerVisibilityIfReady()
+        context.coordinator.applyRequestedTrackVisibilityIfReady()
+        context.coordinator.applyRequestedSelectionIfReady()
+        context.coordinator.applyRequestedTrackFilterIfReady()
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.navigationDelegate = nil
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "trackClick")
         webView.stopLoading()
     }
 
     @MainActor
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         enum Style: String {
             case openBareMap = "openBareMap"
             case openTopo = "openTopo"
         }
 
         let resourceHandler = MapResourceSchemeHandler()
+        var onTrackClick: (String) -> Void
         weak var webView: WKWebView?
         var requestedStyle = Style.openBareMap
+        var requestedVisibleLayers = OpenBareMapLayer.defaultVisible
+        var requestedTracksVisible = true
+        var requestedSelectedTrackID: String?
+        var requestedVisibleTrackIDs: [String]?
         private var isReady = false
         private var appliedStyle: Style?
+        private var appliedSelectedTrackID: String?
+        private var appliedVisibleTrackIDs: [String]?
+
+        init(onTrackClick: @escaping (String) -> Void) {
+            self.onTrackClick = onTrackClick
+        }
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            guard message.name == "trackClick", let trackID = message.body as? String else { return }
+            appliedSelectedTrackID = trackID
+            onTrackClick(trackID)
+        }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isReady = true
             applyRequestedStyleIfReady()
+            applyRequestedLayerVisibilityIfReady()
+            applyRequestedTrackVisibilityIfReady()
+            applyRequestedSelectionIfReady()
+            applyRequestedTrackFilterIfReady()
         }
 
         func applyRequestedStyleIfReady() {
             guard isReady, appliedStyle != requestedStyle else { return }
             appliedStyle = requestedStyle
-            webView?.evaluateJavaScript("setMapStyle('\\(requestedStyle.rawValue)')")
+            webView?.evaluateJavaScript("setMapStyle('\(requestedStyle.rawValue)')")
         }
+
+        func applyRequestedLayerVisibilityIfReady() {
+            guard isReady else { return }
+            let identifiers = requestedVisibleLayers.flatMap(\.layerIdentifiers).sorted()
+            guard let data = try? JSONSerialization.data(withJSONObject: identifiers),
+                  let json = String(data: data, encoding: .utf8)
+            else { return }
+            webView?.evaluateJavaScript("setVisibleOpenBareMapLayers(\(json))")
+        }
+
+        func applyRequestedTrackVisibilityIfReady() {
+            guard isReady else { return }
+            webView?.evaluateJavaScript("setTracksVisible(\(requestedTracksVisible))")
+        }
+
+        func applyRequestedSelectionIfReady() {
+            guard
+                isReady,
+                requestedSelectedTrackID != appliedSelectedTrackID,
+                let data = try? JSONEncoder().encode(requestedSelectedTrackID),
+                let json = String(data: data, encoding: .utf8)
+            else { return }
+
+            appliedSelectedTrackID = requestedSelectedTrackID
+            webView?.evaluateJavaScript("setSelectedTrack(\(json))")
+        }
+
+        func applyRequestedTrackFilterIfReady() {
+            guard
+                isReady,
+                requestedVisibleTrackIDs != appliedVisibleTrackIDs,
+                let data = try? JSONEncoder().encode(requestedVisibleTrackIDs),
+                let json = String(data: data, encoding: .utf8)
+            else { return }
+
+            appliedVisibleTrackIDs = requestedVisibleTrackIDs
+            webView?.evaluateJavaScript("setVisibleTrackIDs(\(json))")
+        }
+
     }
 
     private static var html: String {
@@ -102,9 +231,46 @@ struct MapLibreMapView: NSViewRepresentable {
                   tileSize: 256,
                   maxzoom: 17,
                   attribution: 'Map data © OpenStreetMap contributors, SRTM | Map style © OpenTopoMap (CC-BY-SA)'
+                },
+                walkingTracks: {
+                  type: 'geojson',
+                  data: 'mapdata://tracks/OnzyTracks.geojson'
                 }
               },
-              layers: [{ id: 'opentopo', type: 'raster', source: 'opentopo' }]
+              layers: [
+                { id: 'opentopo', type: 'raster', source: 'opentopo' },
+                {
+                  id: 'walking-tracks-casing',
+                  type: 'line',
+                  source: 'walkingTracks',
+                  paint: {
+                    'line-color': '#ffffff',
+                    'line-width': ['interpolate', ['linear'], ['zoom'], 5, 1.5, 10, 3.5, 14, 6],
+                    'line-opacity': 0.8
+                  }
+                },
+                {
+                  id: 'walking-tracks',
+                  type: 'line',
+                  source: 'walkingTracks',
+                  paint: {
+                    'line-color': '#d9272e',
+                    'line-width': ['interpolate', ['linear'], ['zoom'], 5, 0.8, 10, 2, 14, 4],
+                    'line-opacity': 0.9
+                  }
+                },
+                {
+                  id: 'selected-track',
+                  type: 'line',
+                  source: 'walkingTracks',
+                  filter: ['==', ['get', 'id'], ''],
+                  paint: {
+                    'line-color': '#007aff',
+                    'line-width': ['interpolate', ['linear'], ['zoom'], 5, 2, 10, 5, 14, 8],
+                    'line-opacity': 1
+                  }
+                }
+              ]
             };
 
             const map = new maplibregl.Map({
@@ -120,21 +286,66 @@ struct MapLibreMapView: NSViewRepresentable {
 
             let requestedStyle = 'openTopo';
             const status = document.getElementById('map-status');
+            const openBareMapLayerIDs = [
+              'terrain-hillshade', 'landcover',
+              'administrative-boundaries', 'county-boundaries', 'local-boundaries',
+              'roads-casing-minor', 'roads-minor-path', 'roads-minor-track', 'roads-minor',
+              'road-labels', 'railways', 'station-labels', 'ferry-routes',
+              'cycling-routes', 'hiking-routes', 'island-labels', 'water-labels',
+              'irish-grid-1km', 'irish-grid-10km', 'irish-grid-labels', 'townland-labels'
+            ];
+            const visibleOpenBareMapLayerIDs = new Set();
+            let tracksVisible = true;
+            let selectedTrackID = null;
+            let visibleTrackIDs = null;
+            const trackDataPromise = fetch('mapdata://tracks/OnzyTracks.geojson', { cache: 'force-cache' })
+              .then(response => {
+                if (!response.ok) throw new Error('Track data returned ' + response.status);
+                return response.json();
+              });
 
             function showStatus(message) {
               status.textContent = message;
               status.style.display = 'block';
             }
 
+            function trackFeaturesNear(point, tolerance) {
+              const clickableLayers = ['selected-track', 'walking-tracks', 'walking-tracks-casing']
+                .filter(layerID => map.getLayer(layerID));
+              if (clickableLayers.length === 0) return [];
+
+              const bounds = [
+                [point.x - tolerance, point.y - tolerance],
+                [point.x + tolerance, point.y + tolerance]
+              ];
+              return map.queryRenderedFeatures(bounds, { layers: clickableLayers });
+            }
+
+            map.on('click', event => {
+              const features = trackFeaturesNear(event.point, 12);
+              const trackID = features[0] && features[0].properties && features[0].properties.id;
+              if (trackID === undefined || trackID === null) return;
+
+              selectedTrackID = String(trackID);
+              applySelectedTrack(false);
+              window.webkit.messageHandlers.trackClick.postMessage(selectedTrackID);
+            });
+
+            map.on('mousemove', event => {
+              map.getCanvas().style.cursor = trackFeaturesNear(event.point, 6).length > 0 ? 'pointer' : '';
+            });
+
             map.on('load', () => map.resize());
+            map.on('style.load', () => {
+              applyOpenBareMapLayerVisibility();
+              applyTrackVisibility();
+              applyTrackFilter();
+              applySelectedTrack(true);
+            });
             map.on('error', event => {
               const message = event && event.error ? event.error.message : 'Unknown map error';
               console.error('MapLibre:', message);
-              if (requestedStyle === 'openBareMap') {
-                requestedStyle = 'openTopo';
-                map.setStyle(openTopoStyle);
-                showStatus('OpenBareMap could not be loaded. Showing OpenTopoMap.');
-              } else {
+              if (requestedStyle === 'openTopo') {
                 showStatus('Map loading error: ' + message);
               }
             });
@@ -143,10 +354,12 @@ struct MapLibreMapView: NSViewRepresentable {
               if (name === 'openBareMap') {
                 requestedStyle = name;
                 try {
-                  const response = await fetch('mapdata://package/style.json');
+                  const response = await fetch('mapdata://package/style.json?v=1.1.0', { cache: 'no-store' });
                   if (!response.ok) throw new Error('OpenBareMap style returned ' + response.status);
                   const style = await response.json();
                   map.setStyle(style);
+                  applyOpenBareMapLayerVisibility();
+                  applyTrackVisibility();
                   map.jumpTo({ center: [-8.15412, 53.4], zoom: Math.max(map.getZoom(), 7) });
                   status.style.display = 'none';
                 } catch (error) {
@@ -158,7 +371,92 @@ struct MapLibreMapView: NSViewRepresentable {
               } else {
                 requestedStyle = name;
                 map.setStyle(openTopoStyle);
+                applyTrackVisibility();
                 status.style.display = 'none';
+              }
+            }
+
+            function setVisibleOpenBareMapLayers(layerIDs) {
+              visibleOpenBareMapLayerIDs.clear();
+              for (const layerID of layerIDs) visibleOpenBareMapLayerIDs.add(layerID);
+              applyOpenBareMapLayerVisibility();
+            }
+
+            function applyOpenBareMapLayerVisibility() {
+              for (const layerID of openBareMapLayerIDs) {
+                if (map.getLayer(layerID)) {
+                  const visibility = visibleOpenBareMapLayerIDs.has(layerID) ? 'visible' : 'none';
+                  map.setLayoutProperty(layerID, 'visibility', visibility);
+                }
+              }
+            }
+
+            function setTracksVisible(isVisible) {
+              tracksVisible = isVisible;
+              applyTrackVisibility();
+            }
+
+            function applyTrackVisibility() {
+              const visibility = tracksVisible ? 'visible' : 'none';
+              for (const layerID of ['walking-tracks-casing', 'walking-tracks']) {
+                if (map.getLayer(layerID)) map.setLayoutProperty(layerID, 'visibility', visibility);
+              }
+            }
+
+            function setVisibleTrackIDs(trackIDs) {
+              visibleTrackIDs = trackIDs;
+              applyTrackFilter();
+            }
+
+            function applyTrackFilter() {
+              const filter = visibleTrackIDs === null
+                ? null
+                : ['in', ['get', 'id'], ['literal', visibleTrackIDs]];
+
+              for (const layerID of ['walking-tracks-casing', 'walking-tracks']) {
+                if (map.getLayer(layerID)) map.setFilter(layerID, filter);
+              }
+            }
+
+            function setSelectedTrack(trackID) {
+              selectedTrackID = trackID;
+              applySelectedTrack(true);
+            }
+
+            function applySelectedTrack(shouldZoom) {
+              if (!selectedTrackID || !map.getLayer('selected-track')) return;
+              map.setFilter('selected-track', ['==', ['get', 'id'], selectedTrackID]);
+              if (shouldZoom) focusSelectedTrack();
+            }
+
+            async function focusSelectedTrack() {
+              const trackID = selectedTrackID;
+
+              try {
+                const trackData = await trackDataPromise;
+                const feature = trackData.features.find(candidate =>
+                  String(candidate.properties && candidate.properties.id) === String(trackID)
+                );
+
+                if (!feature || !feature.geometry || trackID !== selectedTrackID) return;
+
+                const bounds = new maplibregl.LngLatBounds();
+                const extendCoordinates = coordinates => {
+                  if (!Array.isArray(coordinates) || coordinates.length === 0) return;
+
+                  if (typeof coordinates[0] === 'number') {
+                    bounds.extend(coordinates);
+                  } else {
+                    coordinates.forEach(extendCoordinates);
+                  }
+                };
+
+                extendCoordinates(feature.geometry.coordinates);
+                if (!bounds.isEmpty() && trackID === selectedTrackID) {
+                  map.fitBounds(bounds, { padding: 60, maxZoom: 15, duration: 700 });
+                }
+              } catch (error) {
+                console.error('Could not focus selected track:', error);
               }
             }
           </script>
@@ -169,30 +467,61 @@ struct MapLibreMapView: NSViewRepresentable {
 }
 
 final class MapResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Sendable {
+    private let taskLock = NSLock()
+    private var stoppedTaskIdentifiers: Set<ObjectIdentifier> = []
+
     private var packageURL: URL {
         MapPackageLocation.packageURL
             ?? URL(fileURLWithPath: "/OpenBareMap-package-not-selected", isDirectory: true)
     }
 
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        let taskIdentifier = ObjectIdentifier(urlSchemeTask as AnyObject)
+        clearStoppedState(for: taskIdentifier)
+
         guard let url = urlSchemeTask.request.url else {
             fail(urlSchemeTask, message: "Missing resource URL")
             return
         }
 
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            do {
-                let response = try response(for: url)
-                urlSchemeTask.didReceive(response.urlResponse)
-                urlSchemeTask.didReceive(response.data)
-                urlSchemeTask.didFinish()
-            } catch {
-                urlSchemeTask.didFailWithError(error)
+            let result = Result { try response(for: url) }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !consumeStoppedState(for: taskIdentifier) else { return }
+
+                switch result {
+                case .success(let response):
+                    urlSchemeTask.didReceive(response.urlResponse)
+                    urlSchemeTask.didReceive(response.data)
+                    urlSchemeTask.didFinish()
+                case .failure(let error):
+                    urlSchemeTask.didFailWithError(error)
+                }
+
+                clearStoppedState(for: taskIdentifier)
             }
         }
     }
 
-    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+        let taskIdentifier = ObjectIdentifier(urlSchemeTask as AnyObject)
+        taskLock.lock()
+        stoppedTaskIdentifiers.insert(taskIdentifier)
+        taskLock.unlock()
+    }
+
+    private func consumeStoppedState(for taskIdentifier: ObjectIdentifier) -> Bool {
+        taskLock.lock()
+        defer { taskLock.unlock() }
+        return stoppedTaskIdentifiers.remove(taskIdentifier) != nil
+    }
+
+    private func clearStoppedState(for taskIdentifier: ObjectIdentifier) {
+        taskLock.lock()
+        stoppedTaskIdentifiers.remove(taskIdentifier)
+        taskLock.unlock()
+    }
 
     private func response(for url: URL) throws -> ResourceResponse {
         let components = url.pathComponents.filter { $0 != "/" }
@@ -211,6 +540,10 @@ final class MapResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked S
 
         if url.host == "assets" {
             return try assetResponse(pathComponents: components, url: url)
+        }
+
+        if url.host == "tracks", let resource = components.first {
+            return try trackResponse(resource: resource, url: url)
         }
 
         throw MapResourceError.notFound(url.absoluteString)
@@ -237,7 +570,124 @@ final class MapResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked S
             sources["townlands"] = townlands
         }
 
+        sources["opentopo-world"] = [
+            "type": "raster",
+            "tiles": [
+                "https://a.tile.opentopomap.org/{z}/{x}/{y}.png",
+                "https://b.tile.opentopomap.org/{z}/{x}/{y}.png",
+                "https://c.tile.opentopomap.org/{z}/{x}/{y}.png"
+            ],
+            "tileSize": 256,
+            "maxzoom": 17,
+            "attribution": "Map data © OpenStreetMap contributors, SRTM | Map style © OpenTopoMap (CC-BY-SA)"
+        ]
+        sources["walkingTracks"] = [
+            "type": "geojson",
+            "data": "mapdata://tracks/OnzyTracks.geojson"
+        ]
         style["sources"] = sources
+
+        guard var layers = style["layers"] as? [[String: Any]] else {
+            throw MapResourceError.invalidStyle
+        }
+        layers = layers.flatMap { layer -> [[String: Any]] in
+            guard layer["id"] as? String == "roads-minor",
+                  let originalFilter = layer["filter"],
+                  let originalPaint = layer["paint"] as? [String: Any]
+            else {
+                return [layer]
+            }
+
+            func roadLayer(
+                identifier: String,
+                classFilter: [Any],
+                dashArray: [Double]
+            ) -> [String: Any] {
+                var output = layer
+                output["id"] = identifier
+                output["filter"] = ["all", originalFilter, classFilter]
+                var paint = originalPaint
+                paint["line-dasharray"] = dashArray
+                output["paint"] = paint
+                return output
+            }
+
+            return [
+                roadLayer(
+                    identifier: "roads-minor-path",
+                    classFilter: ["==", "class", "path"],
+                    dashArray: [1.2, 1.2]
+                ),
+                roadLayer(
+                    identifier: "roads-minor-track",
+                    classFilter: ["==", "class", "track"],
+                    dashArray: [2, 1.2]
+                ),
+                roadLayer(
+                    identifier: "roads-minor",
+                    classFilter: ["!in", "class", "path", "track"],
+                    dashArray: [1, 0]
+                )
+            ]
+        }
+        layers.removeAll { $0["type"] as? String == "background" }
+        layers.insert([
+            "id": "opentopo-world",
+            "type": "raster",
+            "source": "opentopo-world"
+        ], at: 0)
+        layers.append(contentsOf: [
+            [
+                "id": "walking-tracks-casing",
+                "type": "line",
+                "source": "walkingTracks",
+                "paint": [
+                    "line-color": "#ffffff",
+                    "line-width": ["interpolate", ["linear"], ["zoom"], 5, 1.5, 10, 3.5, 14, 6],
+                    "line-opacity": 0.8
+                ]
+            ],
+            [
+                "id": "walking-tracks",
+                "type": "line",
+                "source": "walkingTracks",
+                "paint": [
+                    "line-color": "#d9272e",
+                    "line-width": ["interpolate", ["linear"], ["zoom"], 5, 0.8, 10, 2, 14, 4],
+                    "line-opacity": 0.9
+                ]
+            ],
+            [
+                "id": "selected-track",
+                "type": "line",
+                "source": "walkingTracks",
+                "filter": ["==", ["get", "id"], ""],
+                "paint": [
+                    "line-color": "#007aff",
+                    "line-width": ["interpolate", ["linear"], ["zoom"], 5, 2, 10, 5, 14, 8],
+                    "line-opacity": 1
+                ]
+            ]
+        ])
+        let hiddenOpenBareMapLayers = Set([
+            "administrative-boundaries",
+            "county-boundaries",
+            "local-boundaries",
+            "road-labels",
+            "railways",
+            "station-labels",
+            "ferry-routes"
+        ])
+        for index in layers.indices {
+            guard let identifier = layers[index]["id"] as? String,
+                  hiddenOpenBareMapLayers.contains(identifier)
+            else { continue }
+
+            var layout = layers[index]["layout"] as? [String: Any] ?? [:]
+            layout["visibility"] = "none"
+            layers[index]["layout"] = layout
+        }
+        style["layers"] = layers
         style["sprite"] = "mapdata://assets/sprites/baregps-bog27"
         style["glyphs"] = "mapdata://assets/fonts/{fontstack}/{range}.pbf"
         let output = try JSONSerialization.data(withJSONObject: style)
@@ -274,13 +724,15 @@ final class MapResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked S
 
         let fileName = source == "irish-grid" ? "grid" : source
         let database = try MBTilesDatabase(url: packageURL.appendingPathComponent("\(fileName).mbtiles"))
-        let data = try database.tile(zoom: zoom, column: column, xyzRow: row) ?? Data()
+        let storedData = try database.tile(zoom: zoom, column: column, xyzRow: row) ?? Data()
+        let data = storedData.starts(with: [0x1F, 0x8B])
+            ? try storedData.gunzipped()
+            : storedData
         let isPNG = data.starts(with: [0x89, 0x50, 0x4E, 0x47])
         return ResourceResponse(
             data: data,
             mimeType: isPNG ? "image/png" : "application/x-protobuf",
-            url: url,
-            contentEncoding: data.starts(with: [0x1F, 0x8B]) ? "gzip" : nil
+            url: url
         )
     }
 
@@ -298,6 +750,30 @@ final class MapResourceSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked S
         return ResourceResponse(data: data, mimeType: mimeType, url: url)
     }
 
+    private func trackResponse(resource: String, url: URL) throws -> ResourceResponse {
+        try? TrackLibrary.prepare()
+        let bundledURL = Bundle.main.url(
+            forResource: resource.replacingOccurrences(of: ".geojson", with: ""),
+            withExtension: "geojson",
+            subdirectory: "TrackData"
+        ) ?? Bundle.main.url(
+            forResource: resource.replacingOccurrences(of: ".geojson", with: ""),
+            withExtension: "geojson"
+        )
+        let workingURL = TrackLibrary.geoJSONURL
+        let resourceURL = FileManager.default.fileExists(atPath: workingURL.path)
+            ? workingURL
+            : bundledURL
+        guard let resourceURL else {
+            throw MapResourceError.notFound(resource)
+        }
+        return ResourceResponse(
+            data: try Data(contentsOf: resourceURL, options: .mappedIfSafe),
+            mimeType: "application/geo+json",
+            url: url
+        )
+    }
+
     private func fail(_ task: WKURLSchemeTask, message: String) {
         task.didFailWithError(MapResourceError.notFound(message))
     }
@@ -312,6 +788,9 @@ enum MapPackageLocation {
     )
 
     private static let lock = NSLock()
+    private static let requiredPackageFormat = "baregps-ireland-map-package-v1"
+    private static let requiredApplicationVersion = "2.0"
+    private static let requiredMapVersion = "1.1.0"
     nonisolated(unsafe) private static var retainedAccessURL: URL?
     nonisolated(unsafe) private static var resolvedPackageURL: URL?
 
@@ -378,7 +857,7 @@ enum MapPackageLocation {
 
     private static func findPackage(in selectedURL: URL) -> URL? {
         let styleName = "baregps-style.json"
-        if FileManager.default.fileExists(atPath: selectedURL.appendingPathComponent(styleName).path) {
+        if isRequiredPackage(selectedURL, styleName: styleName) {
             return selectedURL
         }
 
@@ -387,9 +866,27 @@ enum MapPackageLocation {
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         )
-        return children?.first {
-            FileManager.default.fileExists(atPath: $0.appendingPathComponent(styleName).path)
+        return children?.first { isRequiredPackage($0, styleName: styleName) }
+    }
+
+    private static func isRequiredPackage(_ packageURL: URL, styleName: String) -> Bool {
+        guard FileManager.default.fileExists(
+            atPath: packageURL.appendingPathComponent(styleName).path
+        ),
+        let manifestData = try? Data(
+            contentsOf: packageURL.appendingPathComponent("manifest.json")
+        ),
+        let manifest = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+        manifest["packageFormat"] as? String == requiredPackageFormat,
+        let targetApplication = manifest["targetApplication"] as? [String: Any],
+        targetApplication["version"] as? String == requiredApplicationVersion,
+        let map = manifest["map"] as? [String: Any],
+        map["version"] as? String == requiredMapVersion,
+        map["style"] as? String == styleName
+        else {
+            return false
         }
+        return true
     }
 }
 
@@ -399,7 +896,12 @@ private struct ResourceResponse {
 
     init(data: Data, mimeType: String, url: URL, contentEncoding: String? = nil) {
         self.data = data
-        var headers = ["Content-Type": mimeType, "Access-Control-Allow-Origin": "*"]
+        var headers = [
+            "Content-Type": mimeType,
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache"
+        ]
         if let contentEncoding {
             headers["Content-Encoding"] = contentEncoding
         }
@@ -463,6 +965,7 @@ private final class MBTilesDatabase {
 
 private enum MapResourceError: LocalizedError {
     case database(String)
+    case decompression
     case invalidStyle
     case invalidTilePath
     case notFound(String)
@@ -470,9 +973,45 @@ private enum MapResourceError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .database(let name): "Unable to read MBTiles database: \(name)"
+        case .decompression: "Unable to decompress a vector map tile."
         case .invalidStyle: "The OpenBareMap style is invalid."
         case .invalidTilePath: "The requested tile path is invalid."
         case .notFound(let path): "Map resource not found: \(path)"
         }
+    }
+}
+
+private extension Data {
+    func gunzipped() throws -> Data {
+        guard count >= 18,
+              starts(with: [0x1F, 0x8B]),
+              self[index(startIndex, offsetBy: 3)] == 0
+        else {
+            throw MapResourceError.decompression
+        }
+
+        let decodedSize = suffix(4).enumerated().reduce(0) { result, element in
+            result | (Int(element.element) << (element.offset * 8))
+        }
+        guard decodedSize > 0 else { return Data() }
+
+        let compressedPayload = dropFirst(10).dropLast(8)
+        var output = [UInt8](repeating: 0, count: decodedSize)
+        let bytesWritten = output.withUnsafeMutableBytes { destination in
+            compressedPayload.withUnsafeBytes { source in
+                compression_decode_buffer(
+                    destination.bindMemory(to: UInt8.self).baseAddress!,
+                    decodedSize,
+                    source.bindMemory(to: UInt8.self).baseAddress!,
+                    compressedPayload.count,
+                    nil,
+                    COMPRESSION_ZLIB
+                )
+            }
+        }
+        guard bytesWritten == decodedSize else {
+            throw MapResourceError.decompression
+        }
+        return Data(output)
     }
 }
