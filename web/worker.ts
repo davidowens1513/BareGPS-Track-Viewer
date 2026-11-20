@@ -16,10 +16,12 @@ export default {
             const originURL = new URL(url.pathname + url.search, "https://appsbyonzy.pages.dev");
             const originResponse = await fetch(originURL);
             const marker = "</div></article></div></div></div></section>\n</main>";
-            const card = `</div></article><article id="baregps-track-viewer"><h3 class="app-title"><img class="app-icon" src="tools/track-viewer/track-viewer.svg" width="64" height="64" alt="" aria-hidden="true"><span>BareGPS Track Viewer</span></h3><p>Import and explore GPX collections on one map. Compare distance and ascent, focus individual tracks and export the collection as GeoJSON.</p><p class="tool-subtitle">Web · GPX files stay on your device</p><div class="region-actions"><div class="preview-action"><a href="tools/track-viewer/" target="_blank" rel="noopener">Open Track Viewer <span aria-hidden="true">↗</span></a></div></div></article></div></div></div></section>\n</main>`;
-            const html = (await originResponse.text())
-                .replace("assets/app-icons/route-maker.png", "tools/track-viewer/route-maker.svg")
-                .replace(marker, card);
+            const card = `<article id="baregps-track-viewer"><h3 class="app-title"><img class="app-icon" src="tools/track-viewer/track-viewer.svg" width="64" height="64" alt="" aria-hidden="true"><span>BareGPS Track Viewer</span></h3><p>Import and explore GPX collections on one map. GitHub archive contains an XCode project with both the Web version and a rough and ready macOS version mainly for private use.</p><p class="tool-subtitle">Web · GPX files stay on your device</p><div class="region-actions"><div class="preview-action"><a href="tools/track-viewer/" target="_blank" rel="noopener">Open Track Viewer <span aria-hidden="true">↗</span></a></div><a class="map-github" href="https://github.com/davidowens1513/BareGPS-Track-Viewer">Open GitHub <span aria-hidden="true">↗</span></a></div></article>`;
+            const upstreamHTML = (await originResponse.text())
+                .replace("assets/app-icons/route-maker.png", "tools/track-viewer/route-maker.svg");
+            const html = upstreamHTML.includes('id="baregps-track-viewer"')
+                ? upstreamHTML.replace(/<article id="baregps-track-viewer">[\s\S]*?<\/article>/, card)
+                : upstreamHTML.replace(marker, `</div></article>${card}</div></div></div></section>\n</main>`);
             const headers = new Headers(originResponse.headers);
             headers.delete("content-length");
             headers.set("content-type", "text/html; charset=utf-8");
